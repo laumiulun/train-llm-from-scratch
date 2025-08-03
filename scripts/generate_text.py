@@ -54,7 +54,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    generated = generate_text(args.model_path, args.input_text, args.max_new_tokens)
+    generated = generate_text(args.model_path, args.input_text, args.max_new_tokens, config['device'])
     print(f"Generated text:\n{generated}")
 
 if __name__ == "__main__":
