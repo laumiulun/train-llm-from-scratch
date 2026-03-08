@@ -42,7 +42,7 @@ def process_files(input_dir: str, output_file: str, tokenizer_name: str, max_dat
 
                 processed_lines = 0  # Counter for processed lines in the current file
                 count = 0
-                with open (in_file,'r',encoding='utf-8') as f:
+                with zstd.open(in_file,'rt',encoding='utf-8') as f:
                     count += sum(1 for _ in f)
 
                 max_data = max_data_percent * count
