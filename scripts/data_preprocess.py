@@ -7,7 +7,7 @@ from tqdm import tqdm
 import argparse
 from typing import Optional
 
-def process_files(input_dir: str, output_file: str, tokenizer_name: str, max_data: Optional[int] = None) -> None:
+def process_files(input_dir: str, output_file: str, tokenizer_name: str, max_data_percent: Optional[int] = None) -> None:
     """
     Process a specified number of lines from each .jsonl.zst file in the input directory
     and save encoded tokens to an HDF5 file.
@@ -20,8 +20,8 @@ def process_files(input_dir: str, output_file: str, tokenizer_name: str, max_dat
                                   If None, process all lines.
     """
     # Print processing strategy based on max_data
-    if max_data is not None:
-        print(f"You have chosen max_data = {max_data}. Processing only the top {max_data} JSON objects from each file.")
+    if max_data_percent is not None:
+        print(f"You have chosen max_data_percent = {max_data_percent}. Processing only the top {max_data_percent} percentageJSON objects from each file.")
     else:
         print("Processing all available JSON objects from each file.")
 
@@ -41,7 +41,11 @@ def process_files(input_dir: str, output_file: str, tokenizer_name: str, max_dat
                 print(f"Processing: {in_file}")
 
                 processed_lines = 0  # Counter for processed lines in the current file
+                count = 0
+                with open (in_file,'r',encoding='utf-8') as f:
+                    count += sum(1 for _ in f)
 
+                max_data = max_data_percent * count
                 # Open the compressed .jsonl.zst file for reading
                 with zstd.open(in_file, 'rt', encoding='utf-8') as in_f:
                     # Iterate over each line in the file
@@ -89,7 +93,7 @@ def main():
     parser.add_argument("--out_train_file", type=str, default="data/train/pile_train.h5", help="Path to the output training HDF5 file.")
     parser.add_argument("--out_val_file", type=str, default="data/val/pile_dev.h5", help="Path to the output validation HDF5 file.")
     parser.add_argument("--tokenizer_name", type=str, default="r50k_base", help="Name of the tiktoken tokenizer to use.")
-    parser.add_argument("--max_data", type=int, default=1000, help="Maximum number of json objects to process from each file in both train and val datasets (default: 1000).")
+    parser.add_argument("--max_data_percent", type=float, default=0.2, help="Maximum percentage of json objects to process from each file in both train and val datasets (default: 1000).")
 
     args = parser.parse_args()
 
@@ -103,12 +107,12 @@ def main():
 
     # Process training data
     print("Starting training data preprocessing...")
-    process_files(args.train_dir, args.out_train_file, args.tokenizer_name, args.max_data)
+    process_files(args.train_dir, args.out_train_file, args.tokenizer_name, args.max_data_percent)
     print("Training data preprocessing complete.")
 
     # Process validation data
     print("Starting validation data preprocessing...")
-    process_files(args.val_dir, args.out_val_file, args.tokenizer_name, args.max_data)
+    process_files(args.val_dir, args.out_val_file, args.tokenizer_name, args.max_data_percent)
     print("Validation data preprocessing complete.")
 
 # Entry point of the script
