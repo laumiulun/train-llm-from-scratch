@@ -21,7 +21,7 @@ def process_files(input_dir: str, output_file: str, tokenizer_name: str, max_dat
     """
     # Print processing strategy based on max_data
     if max_data_percent is not None:
-        print(f"You have chosen max_data_percent = {max_data_percent}. Processing only the top {max_data_percent} percentageJSON objects from each file.")
+        print(f"You have chosen max_data_percent = {max_data_percent}. Processing only the top {max_data_percent} percentage of JSON objects from each file.")
     else:
         print("Processing all available JSON objects from each file.")
 
@@ -45,7 +45,8 @@ def process_files(input_dir: str, output_file: str, tokenizer_name: str, max_dat
                 with zstd.open(in_file,'rt',encoding='utf-8') as f:
                     count += sum(1 for _ in f)
 
-                max_data = max_data_percent * count
+                max_data = int(max_data_percent * count)
+                print(f"Using {max_data} rows from {in_file}")
                 # Open the compressed .jsonl.zst file for reading
                 with zstd.open(in_file, 'rt', encoding='utf-8') as in_f:
                     # Iterate over each line in the file
