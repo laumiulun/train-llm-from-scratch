@@ -5,7 +5,10 @@ import tiktoken
 import h5py
 from tqdm import tqdm
 import argparse
-from typing import Optional
+import pathlib
+import time
+from multiprocessing import Pool, cpu_count
+from typing import Optional, Tuple
 
 def process_files(input_dir: str, output_file: str, tokenizer_name: str, max_data_percent: Optional[int] = None) -> None:
     """
@@ -21,7 +24,7 @@ def process_files(input_dir: str, output_file: str, tokenizer_name: str, max_dat
     """
     # Print processing strategy based on max_data
     if max_data_percent is not None:
-        print(f"You have chosen max_data_percent = {max_data_percent}. Processing only the top {max_data_percent} percentage of JSON objects from each file.")
+        print(f"You have chosen max_data_percent = {max_data_percent*100}%. Processing only the top {max_data_percent*100} % of JSON objects from each file.")
     else:
         print("Processing all available JSON objects from each file.")
 
@@ -83,6 +86,77 @@ def process_files(input_dir: str, output_file: str, tokenizer_name: str, max_dat
                         if max_data is not None and processed_lines >= max_data:
                             break
 
+def process_single_file(args: Tuple[str, str, str, float]) -> int:
+    """
+    Worker function to process a single .jsonl.zst file.
+    """
+    in_file, tokenizer_name, temp_h5_path, max_data_percent = args
+    enc = tiktoken.get_encoding(tokenizer_name)
+    tokens_count = 0
+
+    # First pass: count lines to determine limit
+    with zstd.open(in_file, 'rt', encoding='utf-8') as f:
+        total_lines = sum(1 for _ in f)
+
+    max_data = int(max_data_percent * total_lines)
+
+    # Second pass: process and store in a temporary per-process H5 file
+    with zstd.open(in_file, 'rt', encoding='utf-8') as in_f, \
+         h5py.File(temp_h5_path, 'w') as out_f:
+
+        dataset = out_f.create_dataset('tokens', (0,), maxshape=(None,), dtype='i')
+        start_index = 0
+
+        for i, line in enumerate(in_f):
+            if i >= max_data:
+                break
+            try:
+                data = json.loads(line)
+                text = data.get('text')
+                if text:
+                    encoded = enc.encode(text + "<|endoftext|>", allowed_special={'<|endoftext|>'})
+                    encoded_len = len(encoded)
+                    dataset.resize(dataset.shape[0] + encoded_len, axis=0)
+                    dataset[start_index:start_index + encoded_len] = encoded
+                    start_index += encoded_len
+            except (json.JSONDecodeError, Exception):
+                continue
+
+        tokens_count = dataset.shape[0]
+
+    return tokens_count
+
+
+def process_directory_multiprocess(input_dir: str, output_file: str, tokenizer_name: str, max_data_percent: float, num_workers: int):
+    """
+    Orchestrates the multiprocessing task and merges temporary results.
+    """
+    files = sorted([os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.endswith(".jsonl.zst")])
+    if not files:
+        return
+
+    # Create arguments for pool
+    temp_files = [f"{output_file}.part{i}.h5" for i in range(len(files))]
+    pool_args = [(f, tokenizer_name, tf, max_data_percent) for f, tf in zip(files, temp_files)]
+
+    print(f"Starting parallel processing with {num_workers} workers...")
+    with Pool(num_workers) as pool:
+        results = list(tqdm(pool.imap(process_single_file, pool_args), total=len(files), desc="Processing files"))
+
+    # Final Step: Merge all temporary H5 files into one
+    print("Merging temporary files...")
+    with h5py.File(output_file, 'w') as final_f:
+        total_tokens = sum(results)
+        final_dataset = final_f.create_dataset('tokens', (total_tokens,), dtype='i')
+
+        current_pos = 0
+        for temp_f_path in tqdm(temp_files, desc="Merging"):
+            with h5py.File(temp_f_path, 'r') as temp_f:
+                data = temp_f['tokens'][:]
+                final_dataset[current_pos : current_pos + len(data)] = data
+                current_pos += len(data)
+            os.remove(temp_f_path) # Clean up temp files
+
 def main():
     """
     Main function to parse arguments, validate directories, and process files.
@@ -94,28 +168,40 @@ def main():
     parser.add_argument("--out_train_file", type=str, default="data/train/pile_train.h5", help="Path to the output training HDF5 file.")
     parser.add_argument("--out_val_file", type=str, default="data/val/pile_dev.h5", help="Path to the output validation HDF5 file.")
     parser.add_argument("--tokenizer_name", type=str, default="r50k_base", help="Name of the tiktoken tokenizer to use.")
-    parser.add_argument("--max_data_percent", type=float, default=0.2, help="Maximum percentage of json objects to process from each file in both train and val datasets (default: 1000).")
+    parser.add_argument("--max_data_percent", type=float, default=0.01, help="Maximum percentage of json objects to process from each file in both train and val datasets (default: 1000).")
+    parser.add_argument("--workers", type=int, default=cpu_count(), help="Number of parallel processes.")
 
     args = parser.parse_args()
 
-    # Validate the existence of the training and validation directories
-    if not os.path.isdir(args.train_dir):
-        print(f"Error: Training directory not found: {args.train_dir}")
-        return
-    if not os.path.isdir(args.val_dir):
-        print(f"Error: Validation directory not found: {args.val_dir}")
-        return
-
-    # Process training data
-    print("Starting training data preprocessing...")
-    process_files(args.train_dir, args.out_train_file, args.tokenizer_name, args.max_data_percent)
-    print("Training data preprocessing complete.")
-
-    # Process validation data
-    print("Starting validation data preprocessing...")
-    process_files(args.val_dir, args.out_val_file, args.tokenizer_name, args.max_data_percent)
-    print("Validation data preprocessing complete.")
+    for d, out in [(args.train_dir, args.out_train_file), (args.val_dir, args.out_val_file)]:
+        if os.path.isdir(d):
+            print(f"Processing directory: {d}")
+            process_directory_multiprocess(d, out, args.tokenizer_name, args.max_data_percent, args.workers)
 
 # Entry point of the script
 if __name__ == "__main__":
-    main()
+    train_dir = "data/train"
+    val_dir = "data/val"
+    tokenizer_name = "r50k_base"
+    max_percent = 6
+    for i in range(1,max_percent + 1):
+        max_data_percent = round(i*0.1,2)
+        train_out = f"data/train/pile_train_{str(max_data_percent).replace(".","")}.h5"
+        val_out = f"data/val/pile_dev_{str(max_data_percent).replace(".","")}.h5"
+
+        if pathlib.Path(train_out).exists() and pathlib.Path(val_out).exists():
+            print(f"Path {train_out} exists already, skipping")
+        else:
+            prev_time = time.time()
+            for d, out in [(train_dir, train_out), (val_dir, val_out)]:
+                if os.path.isdir(d):
+                    print(f"Processing directory: {d}")
+                    process_directory_multiprocess(d, out, tokenizer_name, max_data_percent, 15)
+            print(f"Time it took: {time.time() - prev_time}")
+        # print(val,train_out,val_out)
+
+        # process_files(train_dir,train_out,tokenizer_name,val)
+        # print("Training data preprocessing complete.")
+
+        # process_files(val_dir,val_out,tokenizer_name,val)
+        # print("Validation data preprocessing complete.")
